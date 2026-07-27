@@ -962,6 +962,46 @@
     font-size:10.5px;color:var(--bone-faint);
     text-align:center;
   }
+
+  /* ===== 하루 여러 기록 ===== */
+  .entry-block{
+    border:1px solid var(--hair);
+    padding:14px;
+    margin-bottom:10px;
+  }
+  .entry-block-top{
+    display:flex;align-items:center;gap:9px;
+    margin-bottom:12px;
+  }
+  .eb-dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto;}
+  .eb-name{
+    flex:1;font-size:13.5px;font-weight:400;
+  }
+  .eb-del{
+    background:none;border:none;color:var(--bone-faint);
+    font-family:'IBM Plex Mono',monospace;font-size:9px;
+    letter-spacing:0.12em;cursor:pointer;padding:0;
+  }
+  .eb-fields{ display:flex;gap:10px; }
+  .eb-fields .fld{ flex:1;margin-bottom:10px; }
+  .eb-fields input{ padding:9px 0;font-size:13px; }
+  .eb-memo textarea{ width:100%;padding:9px 0 12px;font-size:13px;line-height:1.7;
+    background:transparent;border:none;border-bottom:1px solid var(--hair);
+    color:var(--bone);font-family:'IBM Plex Sans KR',sans-serif;font-weight:300;
+    border-radius:0;resize:none;min-height:0;overflow:hidden;
+    box-sizing:border-box;display:block;}
+  .eb-memo textarea:focus{outline:none;border-bottom-color:var(--ember);}
+  .eb-memo textarea::placeholder{color:var(--bone-faint);}
+  .day-total{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:10.5px;color:var(--bone-faint);
+    padding:4px 0 14px;
+  }
+  .log-detail{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:10.5px;color:var(--bone-faint);
+    margin-top:5px;
+  }
 </style>
 </head>
 <body>
@@ -1087,10 +1127,11 @@
   <div class="sheet">
     <h3 id="dayTitle">기록</h3>
     <div class="fld">
-      <label>활동 · 중복 선택 가능</label>
+      <label>활동 추가 · 탭하면 아래에 칸이 생겨요</label>
       <div class="pick-row" id="actRow" style="margin-bottom:0"></div>
     </div>
-    <div class="fld"><label>메모 (선택)</label><textarea id="inDayMemo" placeholder="예: 트레드밀 35분 / 평균 122bpm, 컨디션 좋았음"></textarea></div>
+    <div class="day-total" id="dayTotal"></div>
+    <div id="dayEntries"></div>
     <div class="acts">
       <button class="btn btn-g" id="dayCancel">Cancel</button>
       <button class="btn btn-p" id="daySave">Save</button>
@@ -2180,11 +2221,11 @@ function renderCalendar(){
 
   const dow=document.getElementById('calDow');
   if(!dow.dataset.done){
-    dow.innerHTML=['S','M','T','W','T','F','S'].map(d=>`<div>${d}</div>`).join('');
+    dow.innerHTML=['M','T','W','T','F','S','S'].map(d=>`<div>${d}</div>`).join('');
     dow.dataset.done='1';
   }
 
-  const first=new Date(y,m,1).getDay();
+  const first=(new Date(y,m,1).getDay()+6)%7;
   const days=new Date(y,m+1,0).getDate();
   const todayStr=ymd(new Date());
   const grid=document.getElementById('calGrid');
@@ -2214,17 +2255,27 @@ function renderCalendar(){
 
 function renderCalSummary(y,m){
   const prefix=`${y}-${String(m+1).padStart(2,'0')}-`;
-  const counts={};
+  const counts={},mins={},dists={};
   let total=0;
   Object.keys(calData).forEach(k=>{
     if(!k.startsWith(prefix))return;
-    const acts=(calData[k].acts)||[];
+    const rec=calData[k];
+    const acts=(rec.acts)||[];
     if(acts.length)total++;
     acts.forEach(a=>counts[a]=(counts[a]||0)+1);
+    (rec.entries||[]).forEach(e=>{
+      const mn=parseFloat(e.min)||0, dt=parseFloat(e.dist)||0;
+      if(mn) mins[e.act]=(mins[e.act]||0)+mn;
+      if(dt) dists[e.act]=(dists[e.act]||0)+dt;
+    });
   });
   let h=`<div class="cal-sum"><div class="label" style="margin-bottom:14px">This Month</div>`;
   ACTS.forEach(a=>{
-    if(counts[a.key]) h+=`<div class="cal-sum-row"><span>${a.label}</span><b>${counts[a.key]}회</b></div>`;
+    if(!counts[a.key])return;
+    const extra=[];
+    if(mins[a.key]) extra.push(Math.round(mins[a.key])+'분');
+    if(dists[a.key]) extra.push(dists[a.key].toFixed(1)+'km');
+    h+=`<div class="cal-sum-row"><span>${a.label}</span><b>${counts[a.key]}회${extra.length?' · '+extra.join(' · '):''}</b></div>`;
   });
   if(total===0) h+=`<div class="void-note" style="padding:26px 0">이번 달 기록 없음</div>`;
   h+=`<button class="save-routine-btn" id="shareMonthBtn">이번 달 기록 공유하기</button>`;
@@ -2235,28 +2286,111 @@ function renderCalSummary(y,m){
 }
 
 const ovDay=document.getElementById('ovDay');
+let dayEntries=[];   // [{act, min, dist, memo}]
+
+// 활동별 입력 필드 구성
+const DIST_ACTS=['run'];
+function needsDistance(k){ return DIST_ACTS.includes(k); }
+
+function normalizeDay(rec){
+  if(!rec) return [];
+  if(Array.isArray(rec.entries)) return rec.entries.map(e=>({...e}));
+  // 구버전 데이터 변환: acts 배열 + 단일 memo
+  const acts=rec.acts||[];
+  return acts.map((a,i)=>({act:a,min:'',dist:'',memo:i===0?(rec.memo||''):''}));
+}
+
+function renderDayEntries(){
+  const wrap=document.getElementById('dayEntries');
+  if(!dayEntries.length){
+    wrap.innerHTML='<div class="void-note" style="padding:20px 0">위에서 활동을 선택하세요</div>';
+  }else{
+    wrap.innerHTML=dayEntries.map((e,i)=>{
+      const a=actOf(e.act);
+      return `<div class="entry-block">
+        <div class="entry-block-top">
+          <span class="eb-dot" style="background:${a.color}"></span>
+          <span class="eb-name">${a.label}</span>
+          <button class="eb-del" data-rm="${i}">삭제</button>
+        </div>
+        <div class="eb-fields">
+          <div class="fld"><label>시간 (분)</label><input type="number" inputmode="numeric" data-f="min" data-i="${i}" value="${e.min||''}" placeholder="0"></div>
+          ${needsDistance(e.act)?`<div class="fld"><label>거리 (km)</label><input type="number" inputmode="decimal" step="0.1" data-f="dist" data-i="${i}" value="${e.dist||''}" placeholder="0"></div>`:''}
+        </div>
+        <div class="eb-memo"><textarea data-f="memo" data-i="${i}" rows="1" placeholder="메모 · 예: 힙쓰러스트 40kg 12×3">${esc(e.memo||'')}</textarea></div>
+      </div>`;
+    }).join('');
+  }
+
+  const autoGrow=el=>{ el.style.height='0px'; el.style.height=(el.scrollHeight+2)+'px'; };
+  const growAll=()=>wrap.querySelectorAll('textarea[data-f]').forEach(autoGrow);
+  growAll();
+  requestAnimationFrame(growAll);
+  wrap.querySelectorAll('[data-f]').forEach(inp=>{
+    inp.addEventListener('input',()=>{
+      const i=parseInt(inp.dataset.i,10);
+      dayEntries[i][inp.dataset.f]=inp.value;
+      if(inp.tagName==='TEXTAREA') autoGrow(inp);
+      paintDayTotal();
+    });
+  });
+  wrap.querySelectorAll('[data-rm]').forEach(b=>{
+    b.addEventListener('click',()=>{
+      dayEntries.splice(parseInt(b.dataset.rm,10),1);
+      renderDayEntries();paintActRow();
+    });
+  });
+  paintDayTotal();
+}
+
+function paintDayTotal(){
+  const min=dayEntries.reduce((a,e)=>a+(parseFloat(e.min)||0),0);
+  const km=dayEntries.reduce((a,e)=>a+(parseFloat(e.dist)||0),0);
+  const bits=[];
+  if(dayEntries.length) bits.push(dayEntries.length+'개 활동');
+  if(min) bits.push(min+'분');
+  if(km) bits.push(km.toFixed(1)+'km');
+  document.getElementById('dayTotal').textContent=bits.join(' · ');
+}
+
+function paintActRow(){
+  const row=document.getElementById('actRow');
+  row.querySelectorAll('.pick').forEach(b=>{
+    b.classList.toggle('active', dayEntries.some(e=>e.act===b.dataset.a));
+  });
+}
+
 function openDay(key){
   dayKey=key;
-  const rec=calData[key]||{acts:[],memo:''};
-  daySel=(rec.acts||[]).slice();
+  dayEntries=normalizeDay(calData[key]);
   const p=key.split('-');
   document.getElementById('dayTitle').textContent=`${parseInt(p[1])}월 ${parseInt(p[2])}일`;
-  document.getElementById('inDayMemo').value=rec.memo||'';
   const row=document.getElementById('actRow');
-  row.innerHTML=ACTS.map(a=>`<button class="pick sm${daySel.includes(a.key)?' active':''}" data-a="${a.key}">${a.label}</button>`).join('');
+  row.innerHTML=ACTS.map(a=>`<button class="pick sm" data-a="${a.key}">${a.label}</button>`).join('');
   row.querySelectorAll('.pick').forEach(b=>b.addEventListener('click',()=>{
     const k=b.dataset.a;
-    daySel=daySel.includes(k)?daySel.filter(x=>x!==k):daySel.concat(k);
-    b.classList.toggle('active',daySel.includes(k));
+    const i=dayEntries.findIndex(e=>e.act===k);
+    if(i>=0) dayEntries.splice(i,1);
+    else dayEntries.push({act:k,min:'',dist:'',memo:''});
+    renderDayEntries();paintActRow();
   }));
+  paintActRow();
+  renderDayEntries();
   ovDay.classList.add('show');
 }
+
 ovDay.addEventListener('click',e=>{if(e.target===ovDay)ovDay.classList.remove('show');});
 document.getElementById('dayCancel').addEventListener('click',()=>ovDay.classList.remove('show'));
 document.getElementById('daySave').addEventListener('click',async()=>{
-  const memo=document.getElementById('inDayMemo').value.trim();
-  if(!daySel.length&&!memo){ delete calData[dayKey]; }
-  else{ calData[dayKey]={acts:daySel,memo}; }
+  const clean=dayEntries.filter(e=>e.act);
+  if(!clean.length){ delete calData[dayKey]; }
+  else{
+    calData[dayKey]={
+      acts:clean.map(e=>e.act),
+      entries:clean,
+      memo:clean.filter(e=>e.memo).map(e=>actOf(e.act).label+': '+e.memo).join('\n')
+    };
+  }
   await saveCal();
   ovDay.classList.remove('show');
   renderCalendar();
